@@ -25,7 +25,7 @@ CREATE TABLE $TEST_TABLE
     lastname  VARCHAR(32) NOT NULL,
     phone     VARCHAR(32) NOT NULL,
     email     VARCHAR(32) NOT NULL
-  ) ;
+  )
 EOSQL
 
 sub find_file_up {

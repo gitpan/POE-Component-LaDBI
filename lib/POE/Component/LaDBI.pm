@@ -8,7 +8,7 @@ use IO::Handle;
 use IO::File;
 use Data::Dumper;
 
-our $VERSION = '1.0';
+our $VERSION = '1.0.1';
 
 use POE qw(
 	   Wheel::Run

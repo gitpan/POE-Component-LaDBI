@@ -11,7 +11,7 @@ my $cfg = load_cfg_file( find_file_up($BASE_CFG_FN,0) );
 my $ok = 1;
 
 my $dbh = DBI->connect($cfg->{DSN}, $cfg->{USER}, $cfg->{PASSWD},
-		       {RaiseError => 0, AutoCommit => 0});
+		       {RaiseError => 0, AutoCommit => 1});
 
 unless (defined $dbh) {
   print "Bail out!\n", "#Failed to connect to database\n";
@@ -34,7 +34,7 @@ for my $row (@TABLE_DATA) {
   
   $rv = $dbh->do(<<"EOSQL");
 INSERT INTO $TEST_TABLE ( firstname, lastname, phone, email )
-       VALUES      ( $firstname, $lastname, $phone, $email ) ;
+       VALUES      ( $firstname, $lastname, $phone, $email ) 
 EOSQL
 
   unless (defined $rv) {

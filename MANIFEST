@@ -34,3 +34,4 @@ t/26_rollback.t
 t/27_commit.t
 t/28_begin_work.t
 t/99_dbi_drop_test_table.t
+META.yml                                 Module meta-data (added by MakeMaker)

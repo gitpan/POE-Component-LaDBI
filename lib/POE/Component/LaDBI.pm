@@ -8,7 +8,7 @@ use IO::Handle;
 use IO::File;
 use Data::Dumper;
 
-our $VERSION = '1.0.3';
+our $VERSION = '1.1.0';
 
 use POE qw(
 	   Wheel::Run
@@ -156,37 +156,46 @@ sub run_stdout {
   my ($k,$s,$h) = @_[KERNEL,SESSION,HEAP];
   my ($resp, $wheel_id) = @_[ARG0,ARG1];
 
-  my ($sender, $succ_ev, $fail_ev) = @{ delete $h->{req_ids}->{ $resp->id } };
+  my ($sender, $succ_ev, $fail_ev, $userdata) =
+    @{ delete $h->{req_ids}->{ $resp->id } };
 
   my ($ev, $id, $type, @data);
   $id   = $resp->handle_id;
   $type = $resp->datatype;
-  @data = ($resp->data);
   if     ($resp->code eq 'OK')
     {
       $ev   = $succ_ev;
+      @data = ($resp->data);
     }
   elsif ($resp->code eq 'FAILED')
     {
       $ev   = $fail_ev;
+      my $err = $resp->data;
+      my (@err) = (undef, undef);
+
       if ($resp->datatype eq 'ERROR') {
-	my $err = $resp->data;
-	@data = ($err->{errstr}, $err->{errnum});
+	@err = ($err->{errstr}, $err->{errnum});
       }
       elsif ($resp->datatype eq 'EXCEPTION') {
-	1; #no-op
+        $err[0] = $err;
       }
-      else { $type = 'UNKNOWN ERROR TYPE'; }
+      else {
+       $type = 'UNKNOWN ERROR TYPE'; 
+      }
+
+      @data = @err;
     }
   elsif ($resp->code eq 'INVALID_HANDLE_ID')
     {
       $type = 'INVALID_HANDLE_ID';
-      @data = ();
+      @data = (undef, undef);
     }
   else {
     $ev = $fail_ev;
     $type = 'UNKNOWN RESPONSE CODE';
   }
+
+  push(@data, $userdata) if defined $userdata;
 
   $k->post($sender, $ev, $id, $type, @data);
 
@@ -230,10 +239,11 @@ sub dbi_request_handler {
 
   my $succ_ev = $args{successevent};
   my $fail_ev = $args{failureevent};
+  my $userdata = $args{userdata};
 
   $k->refcount_increment($sender->ID, 'ladbi');
 
-  $h->{req_ids}->{ $req->id } = [$sender, $succ_ev, $fail_ev];
+  $h->{req_ids}->{ $req->id } = [$sender, $succ_ev, $fail_ev, $userdata];
 
   $h->{wheel}->put( $req );
 
@@ -348,112 +358,132 @@ $h->{ladbi} = POE::Component::LaDBI->create
 $k->post(ladbi => 'connect',
          SuccessEvent => 'connected',
          FailureEvent  => 'connect_failed',
-         Args => ["dbi:Pg:dbname=$dbname", $user, $passwd]);
+         Args => ["dbi:Pg:dbname=$dbname", $user, $passwd],
+         UserData => $stuff );
 
 $k->post(ladbi => 'disconnect',
          SuccessEvent => 'disconnected',
          FailureEvent  => 'disconnect_failed',
-         HandleId => $dbh_id);
+         HandleId => $dbh_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'prepare',
          SuccessEvent => 'prepared',
          FailureEvent => 'prepare_failed',
          HandleId => $dbh_id,
-         Args => [$sql]);
+         Args => [$sql], 
+         UserData => $stuff);
 
 $k->post('ladbi' => 'finish',
          SuccessEvent => 'finished',
          FailureEvent => 'finish_failed',
-         HandleId => $sth_id);
+         HandleId => $sth_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'execute',
          SuccessEvent => 'executed',
          FailureEvent => 'execute_failed',
          HandleId => $sth_id,
-         Args => [$bind_val0, $bind_val1, ...]);
+         Args => [$bind_val0, $bind_val1, ...],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'rows',
          SuccessEvent => 'rows_found',
          FailureEvent => 'rows_failed',
-         HandleId => $sth_id);
+         HandleId => $sth_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'fetchrow',
          SuccessEvent => 'row_fetched',
          FailureEvent => 'fetch_failed',
-         HandleId => $sth_id);
+         HandleId => $sth_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'fetchrow_hash',
          SuccessEvent => 'row_fetched',
          FailureEvent => 'fetch_failed',
-         HandleId => $sth_id);
+         HandleId => $sth_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'fetchall',
          SuccessEvent => 'all_fetched',
          FailureEvent => 'fetchall_failed',
          HandleId => $sth_id,
-         Args => [ @optional_indicies ] );
+         Args => [ @optional_indicies ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'fetchall_hash',
          SuccessEvent => 'all_fetched',
          FailureEvent => 'fetchall_failed',
          HandleId => $sth_id,
-         Args => [ @optional_keys ] );
+         Args => [ @optional_keys ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'ping',
          SuccessEvent => 'check_ping_results',
          FailureEvent => 'ping_failed',
-         HandleId => $dbh_id);
+         HandleId => $dbh_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'do',
          SuccessEvent => 'check_do_results',
          FailureEvent => 'do_failed',
          HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref, @bind_values ]);
+         Args => [ $sql, $attr_hashref, @bind_values ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'begin_work',
          SuccessEvent => 'check_transactions_enabled',
          FailureEvent => 'begin_work_failed',
-         HandleId => $dbh_id);
+         HandleId => $dbh_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'commit',
          SuccessEvent => 'check_commit',
          FailureEvent => 'commit_failed',
-         HandleId => $dbh_id);
+         HandleId => $dbh_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'rollback',
          SuccessEvent => 'check_rollback',
          FailureEvent => 'rollback_failed',
-         HandleId => $dbh_id);
+         HandleId => $dbh_id,
+         UserData => $stuff);
 
 $k->post('ladbi' => 'selectall',
          SuccessEvent => 'check_results',
          FailureEvent => 'selectall_failed',
          HandleId => $dbh_id,
-         Args => [ $sql ]);
+         Args => [ $sql ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'selectall_hash',
          SuccessEvent => 'check_results',
          FailureEvent => 'selectall_failed',
          HandleId => $dbh_id,
-         Args => [ $sql, $key_field ]);
+         Args => [ $sql, $key_field ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'selectcol',
          SuccessEvent => 'check_results',
          FailureEvent => 'selectcol_failed',
          HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref ]);
+         Args => [ $sql, $attr_hashref ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'selectrow',
          SuccessEvent => 'check_results',
          FailureEvent => 'selectrow_failed',
          HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref ]);
+         Args => [ $sql, $attr_hashref ],
+         UserData => $stuff);
 
 $k->post('ladbi' => 'quote',
          SuccessEvent => 'use_quote_results',
          FailureEvent => 'quote_failed',
          HandleId => $dbh_id,
-         Args => [ $value ]);
+         Args => [ $value ],
+         UserData => $stuff);
 
 
 
@@ -467,6 +497,20 @@ The handler takes the same arguments. Not all events use the all the argument
 fields. The arguments fields/keys are:
 
 =over 4
+
+=item C<UserData>
+
+C<UserData> is a tool you, the programmer, may use to correlate
+LaDBI requests with LaDBI responses. Both C<SuccessEvent> and
+C<ErrorEvent> handlers will be passed the C<UserData> originally
+submitted in the C<<$k->post()>>.
+
+C<UserData> must be a scalar. As a scalar it may be a reference
+to a hash, or array, or object, or anything your twisted mind
+may come up with. Therefor you may use any data in the scalar
+to correlate the response to the original request. Further, you
+may just use this as a clever way to pass data from the subroutine
+where the request was done to the response handler.
 
 =item C<SuccessEvent>
 
@@ -488,7 +532,7 @@ The handler for the  C<SuccessEvent> is invoked the following arguments.
 
   sub success_event_handler {
      ...
-     my ($handle_id, $datatype, $data) = @_[ARG0,ARG1,ARG2];
+     my ($handle_id, $datatype, $data, $userdata) = @_[ARG0..ARG3];
      ...
   }
 
@@ -594,6 +638,11 @@ Some calls may return successfully with $data a defined value, yet $data may
 be a "zero-but-true" value. For example look at the L<DBI> description of
 C<$dbh-E<gt>ping>.
 
+=item C<$userdata>
+
+The scalar passed into the original request which resulted in this response.
+It is entirely programmer defined what is held in this scalar value.
+
 =back
 
 =item C<FailureEvent>
@@ -621,7 +670,8 @@ A C<FailureEvent> is provided the following arguments.
 
   sub failure_event {
     ...
-    my ($handle_id, $errtype, $errstr, $err) = @_[ARG0..ARG3];
+    my ($handle_id, $errtype, $errstr, $errnum, $userdata) = 
+          @_[ARG0..ARG4];
     ...
   }
 

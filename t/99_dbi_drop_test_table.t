@@ -3,8 +3,13 @@ use DBI;
 use Test;
 BEGIN { plan test => 1 };
 
-use vars qw($BASE_CFG_FN @CFG_PARAMS $TEST_TABLE @TABLE_DATA);
+use vars qw($NO_DB_TESTS_FN $BASE_CFG_FN @CFG_PARAMS $TEST_TABLE @TABLE_DATA);
 require "ladbi_config.pl";
+
+if (find_file_up($NO_DB_TESTS_FN, 1)) {
+  skip("skip no database tests", 1);
+  exit 0;
+}
 
 my $cfg = load_cfg_file( find_file_up($BASE_CFG_FN,0) );
 

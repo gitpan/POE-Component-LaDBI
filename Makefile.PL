@@ -52,6 +52,7 @@ WriteMakefile(
 			    DBI => '1.20',
 			    POE => '0.18'
                            },
+    'realclean'         => { FILES => 'NO_DB_TESTS config.pcf *.log' },
     ($] >= 5.005 ?    ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM => 'lib/POE/Component/LaDBI.pm', 
        AUTHOR     => 'A. U. Thor <a.u.thor@a.galaxy.far.far.away>') : ()),

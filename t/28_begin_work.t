@@ -12,8 +12,13 @@ use POE::Component::LaDBI;
 
 use Data::Dumper;
 
-use vars qw($BASE_CFG_FN $LADBI_ALIAS $TEST_LOG_FN $TEST_TABLE @EXTRA_ROW);
+use vars qw($NO_DB_TESTS_FN $BASE_CFG_FN $LADBI_ALIAS $TEST_LOG_FN $TEST_TABLE @EXTRA_ROW);
 require "ladbi_config.pl";
+
+if (find_file_up($NO_DB_TESTS_FN, 1)) {
+  skip("skip no database tests", 1);
+  exit 0;
+}
 
 my $CFG = load_cfg_file( find_file_up($BASE_CFG_FN,0) );
 

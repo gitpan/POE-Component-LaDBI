@@ -6,7 +6,9 @@ lib/POE/Component/LaDBI/Request.pm
 lib/POE/Component/LaDBI/Response.pm
 Makefile.PL
 MANIFEST
+MANIFEST.SKIP
 README
+ChangeLog
 ladbi_config.pl
 example.pl
 t/00_use.t
@@ -16,11 +18,11 @@ t/10_connect.t
 t/11_prepare.t
 t/12_execute.t
 t/13_finish.t
-t/14_rows.t
-t/15_fetchrow.t
-t/16_fetchrow_hash.t
-t/17_fetchall.t
-t/18_fetchall_hash.t
+t/14_fetchrow.t
+t/15_fetchrow_hash.t
+t/16_fetchall.t
+t/17_fetchall_hash.t
+t/18_rows.t
 t/19_selectrow.t
 t/20_selectall.t
 t/21_selectall_hash.t

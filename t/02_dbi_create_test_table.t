@@ -34,7 +34,7 @@ for my $row (@TABLE_DATA) {
   
   $rv = $dbh->do(<<"EOSQL");
 INSERT INTO $TEST_TABLE ( firstname, lastname, phone, email )
-       VALUES      ( $firstname, $lastname, $phone, $email ) 
+       VALUES      ( $firstname, $lastname, $phone, $email )
 EOSQL
 
   unless (defined $rv) {
@@ -48,7 +48,8 @@ EOSQL
   }
 }
 
-$dbh->commit();
+#$dbh->commit(); #unnessesary now that AutoCommit is on
+
 $dbh->disconnect();
 
 ok($ok);

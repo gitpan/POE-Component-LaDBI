@@ -19,13 +19,13 @@ my $CFG = load_cfg_file( find_file_up($BASE_CFG_FN,0) );
 my $LOG = IO::File->new($TEST_LOG_FN, "a") or exit 1;
 $LOG->autoflush(1);
 
-$LOG->print("### rows.t\n");
+$LOG->print("### fetchall.t\n");
 
 use Data::Dumper;
 
 my $SQL = "SELECT phone FROM $TEST_TABLE WHERE firstname = ?";
 my $FNAME = 'jim';
-my $ROWS = 1;
+my $PHONE = '111-555-1111';
 
 my $OK = 0;
 
@@ -65,16 +65,16 @@ POE::Session->create
       my ($sth_id, $datatype, $data) = @_[ARG0..ARG2];
       $LOG->print("execute: sth_id=$sth_id\n");
       $_[KERNEL]->post( $LADBI_ALIAS => 'execute',
-			SuccessEvent => 'rows',
+			SuccessEvent => 'fetchall',
 			FailureEvent => 'dberror',
 			HandleId     => $sth_id,
 			Args => [ $FNAME ]
 		     );
     },
-    rows       => sub {
+    fetchall    => sub {
       my ($sth_id, $datatype, $data) = @_[ARG0..ARG2];
       $LOG->print("fetch: sth_id=$sth_id\n");
-      $_[KERNEL]->post( $LADBI_ALIAS => 'rows',
+      $_[KERNEL]->post( $LADBI_ALIAS => 'fetchall',
 			SuccessEvent => 'cmp_results',
 			FailureEvent => 'dberror',
 			HandleId     => $sth_id
@@ -84,16 +84,24 @@ POE::Session->create
       my ($sth_id, $datatype, $data) = @_[ARG0..ARG2];
       my $ok = 0;
       my $err = 'success';
-      unless ($datatype = 'RV') {
-	$err = "datatype != 'RV', datatype=$datatype";
+      unless ($datatype = 'TABLE') {
+	$err = "datatype != 'TABLE', datatype=$datatype";
 	goto CMP_YIELD;
       }
       unless (defined $data) {
 	$err = "data undefined";
 	goto CMP_YIELD;
       }
-      unless ($ROWS eq $data) {
-	$err = "not the correct result; expected $ROWS; found $data;";
+      unless (@$data == 1) {
+	$err = "nrows != 1, nrows=".scalar(@$data);
+	goto CMP_YIELD;
+      }
+      unless (@{$data->[0]} == 1) {
+	$err = "nelts != 1, nelts=".scalar(@{$data->[0]});
+	goto CMP_YIELD;
+      }
+      unless ($PHONE eq $data->[0]->[0]) {
+	$err = "not the correct result; expected $PHONE; found ".$data->[0]->[0].";";
 	goto CMP_YIELD;
       }
       $ok = 1;

@@ -21,7 +21,7 @@ unless (defined $dbh) {
 my ($rv);
 
 $rv = $dbh->do(<<"EOSQL");
-DROP TABLE $TEST_TABLE 
+DROP TABLE $TEST_TABLE
 EOSQL
 
 unless (defined $rv) {

@@ -1,6 +1,6 @@
 package POE::Component::LaDBI;
 
-use v5.6.0;
+use 5.006_000;
 use strict;
 use warnings;
 
@@ -8,7 +8,9 @@ use IO::Handle;
 use IO::File;
 use Data::Dumper;
 
-our $VERSION = '1.1.0';
+BEGIN {
+  our $VERSION = '1.2.0';
+}
 
 use POE qw(
 	   Wheel::Run
@@ -52,6 +54,7 @@ sub create {
 	_stop           => \&stop_session       ,
 	shutdown        => \&shutdown           ,
 #	termsig         => \&termsig            ,
+	register        => \&register           ,
 	run_error       => \&run_error          ,
 	run_stdout      => \&run_stdout         ,
 	run_stderr      => \&run_stderr         ,
@@ -93,6 +96,8 @@ sub start_session {
 
   $h->{req_ids} = {};
 
+  $h->{registered_sessions} = {};
+
   return 1;
 } #end: start_session()
 
@@ -112,6 +117,12 @@ sub shutdown {
   my ($k,$s,$h) = @_[KERNEL, SESSION, HEAP];
   my ($cause, $errstr) = @_[ARG0,ARG1];
 
+  for my $sid ( keys %{ $h->{registered_sessions} } ) {
+    my $reg_info = $h->{registered_sessions}->{$sid};
+    my $offline_event = $reg_info->[0];
+    $k->post($sid => $offline_event, $cause, $errstr);
+  }
+
   $k->alias_remove( delete $h->{alias} );
 
   $h->{wheel}->kill(-9);
@@ -129,6 +140,22 @@ sub shutdown {
 } #end: shutdown()
 
 
+sub register {
+  my ($k,$s,$h) = @_[KERNEL,SESSION,HEAP];
+  my (%a) = @_[ARG0..$#_];
+
+  my %args = map { lc($_) => $a{$_} } keys %a;
+
+  return unless defined $args{offlineevent};
+  my $offline_event = $args{offlineevent};
+
+  my $sid = $_[SENDER]->ID;
+
+  $h->{registered_sessions}->{$sid} = [ $offline_event ];
+
+  return;
+} #end: register()
+
 
 # sub termsig {
 #   my ($k,$s) = @_[KERNEL,SESSION];
@@ -143,9 +170,9 @@ sub shutdown {
 
 sub run_error {
   my ($k,$s,$h) = @_[KERNEL,SESSION,HEAP];
-  my ($type, $errnum, $errstr, $wheel_id) = @_[ARG0..ARG3];
+  my ($errtype, $errnum, $errstr, $wheel_id) = @_[ARG0..ARG3];
 
-  $k->yield('shutdown', $errstr, $type);
+  $k->yield('shutdown', $errstr, $errtype);
 
   return 1;
 } #end: run_error()
@@ -162,42 +189,48 @@ sub run_stdout {
   my ($ev, $id, $type, @data);
   $id   = $resp->handle_id;
   $type = $resp->datatype;
+
   if     ($resp->code eq 'OK')
     {
+      # On Success:
+      #   @data will have one element
+      #
       $ev   = $succ_ev;
       @data = ($resp->data);
     }
   elsif ($resp->code eq 'FAILED')
     {
+      # On Failure:
+      #   @data will have two elements
+      #
       $ev   = $fail_ev;
       my $err = $resp->data;
-      my (@err) = (undef, undef);
 
       if ($resp->datatype eq 'ERROR') {
-	@err = ($err->{errstr}, $err->{errnum});
+	@data = ($err->{errstr}, $err->{errnum});
       }
       elsif ($resp->datatype eq 'EXCEPTION') {
-        $err[0] = $err;
+        @data = ($err, undef);
       }
       else {
-       $type = 'UNKNOWN ERROR TYPE'; 
+	$type = 'UNKNOWN ERROR TYPE';
+	@data = (undef, undef);
       }
-
-      @data = @err;
     }
   elsif ($resp->code eq 'INVALID_HANDLE_ID')
     {
+      # On Operational Error:
+      #   @data will have two elements
+      #
       $type = 'INVALID_HANDLE_ID';
-      @data = (undef, undef);
+      @data = ('', undef);
     }
   else {
     $ev = $fail_ev;
     $type = 'UNKNOWN RESPONSE CODE';
   }
 
-  push(@data, $userdata) if defined $userdata;
-
-  $k->post($sender, $ev, $id, $type, @data);
+  $k->post($sender, $ev, $id, $type, @data, $userdata);
 
   $k->refcount_decrement($sender->ID, 'ladbi');
 
@@ -233,12 +266,20 @@ sub dbi_request_handler {
      HandleId => $args{handleid}
     )
       or do {
-	$k->post($sender, $args{failureevent}, '', 'INVALID_REQUEST', '', 0);
+	# Operational Error
+	#
+	$k->post($sender, $args{failureevent},
+		 $args{handle_id},   # $_[ARG0] : handle_id
+		 'INVALID_REQUEST',  # $_[ARG1] : errtype
+		 '',                 # $_[ARG2] : errstr
+		 undef,              # $_[ARG3] : err
+		 $args{userdata}     # $_[ARG4] : userdata
+		);
 	return;
       };
 
-  my $succ_ev = $args{successevent};
-  my $fail_ev = $args{failureevent};
+  my $succ_ev  = $args{successevent};
+  my $fail_ev  = $args{failureevent};
   my $userdata = $args{userdata};
 
   $k->refcount_increment($sender->ID, 'ladbi');
@@ -348,150 +389,201 @@ handle non-blocking access to the DBI API.
 
 =head1 SYNOPSIS
 
-use POE::Component::LaDBI;
+ use POE::Component::LaDBI;
 
-$h->{ladbi} = POE::Component::LaDBI->create
-  (
-   Alias => 'ladbi'
-  );
+ POE::Component::LaDBI->create( Alias => "ladbi" );
 
-$k->post(ladbi => 'connect',
-         SuccessEvent => 'connected',
-         FailureEvent  => 'connect_failed',
-         Args => ["dbi:Pg:dbname=$dbname", $user, $passwd],
-         UserData => $stuff );
+ $k->call(ladbi => "register",
+          OfflineEvent => 'db_offline');
 
-$k->post(ladbi => 'disconnect',
-         SuccessEvent => 'disconnected',
-         FailureEvent  => 'disconnect_failed',
+ $k->post(ladbi => "connect",
+          SuccessEvent => "connected",
+          FailureEvent  => "connect_failed",
+          Args => ["dbi:Pg:dbname=$dbname", $user, $passwd],
+          UserData => $stuff );
+
+ $k->post(ladbi => "disconnect",
+          SuccessEvent => "disconnected",
+          FailureEvent  => "disconnect_failed",
+          HandleId => $dbh_id,
+          UserData => $stuff);
+
+ $k->post("ladbi" => "prepare",
+          SuccessEvent => "prepared",
+          FailureEvent => "prepare_failed",
+          HandleId => $dbh_id,
+          Args => [$sql], 
+          UserData => $stuff);
+
+ $k->post("ladbi" => "finish",
+          SuccessEvent => "finished",
+          FailureEvent => "finish_failed",
+          HandleId => $sth_id,
+          UserData => $stuff);
+
+ $k->post("ladbi" => "execute",
+          SuccessEvent => "executed",
+          FailureEvent => "execute_failed",
+          HandleId => $sth_id,
+          Args => [$bind_val0, $bind_val1, ...],
+          UserData => $stuff);
+
+ $k->post("ladbi" => "rows",
+          SuccessEvent => "rows_found",
+          FailureEvent => "rows_failed",
+          HandleId => $sth_id,
+          UserData => $stuff);
+
+ $k->post("ladbi" => "fetchrow",
+          SuccessEvent => "row_fetched",
+          FailureEvent => "fetch_failed",
+          HandleId => $sth_id,
+          UserData => $stuff);
+
+ $k->post("ladbi" => "fetchrow_hash",
+          SuccessEvent => "row_fetched",
+          FailureEvent => "fetch_failed",
+          HandleId => $sth_id,
+          UserData => $stuff);
+
+ $k->post("ladbi" => "fetchall",
+          SuccessEvent => "all_fetched",
+          FailureEvent => "fetchall_failed",
+          HandleId => $sth_id,
+          Args => [ @optional_indicies ],
+          UserData => $stuff);
+
+ $k->post("ladbi" => "fetchall_hash",
+          SuccessEvent => "all_fetched",
+          FailureEvent => "fetchall_failed",
+          HandleId => $sth_id,
+          Args => [ @optional_keys ],
+          UserData => $stuff);
+
+ $k->post("ladbi" => "ping",
+         SuccessEvent => "check_ping_results",
+         FailureEvent => "ping_failed",
          HandleId => $dbh_id,
          UserData => $stuff);
 
-$k->post('ladbi' => 'prepare',
-         SuccessEvent => 'prepared',
-         FailureEvent => 'prepare_failed',
-         HandleId => $dbh_id,
-         Args => [$sql], 
-         UserData => $stuff);
+ $k->post("ladbi" => "do",
+          SuccessEvent => "check_do_results",
+          FailureEvent => "do_failed",
+          HandleId => $dbh_id,
+          Args => [ $sql, $attr_hashref, @bind_values ],
+          UserData => $stuff);
 
-$k->post('ladbi' => 'finish',
-         SuccessEvent => 'finished',
-         FailureEvent => 'finish_failed',
-         HandleId => $sth_id,
-         UserData => $stuff);
+ $k->post("ladbi" => "begin_work",
+          SuccessEvent => "check_transactions_enabled",
+          FailureEvent => "begin_work_failed",
+          HandleId => $dbh_id,
+          UserData => $stuff);
 
-$k->post('ladbi' => 'execute',
-         SuccessEvent => 'executed',
-         FailureEvent => 'execute_failed',
-         HandleId => $sth_id,
-         Args => [$bind_val0, $bind_val1, ...],
-         UserData => $stuff);
+ $k->post("ladbi" => "commit",
+          SuccessEvent => "check_commit",
+          FailureEvent => "commit_failed",
+          HandleId => $dbh_id,
+          UserData => $stuff);
 
-$k->post('ladbi' => 'rows',
-         SuccessEvent => 'rows_found',
-         FailureEvent => 'rows_failed',
-         HandleId => $sth_id,
-         UserData => $stuff);
+ $k->post("ladbi" => "rollback",
+          SuccessEvent => "check_rollback",
+          FailureEvent => "rollback_failed",
+          HandleId => $dbh_id,
+          UserData => $stuff);
 
-$k->post('ladbi' => 'fetchrow',
-         SuccessEvent => 'row_fetched',
-         FailureEvent => 'fetch_failed',
-         HandleId => $sth_id,
-         UserData => $stuff);
+ $k->post("ladbi" => "selectall",
+          SuccessEvent => "check_results",
+          FailureEvent => "selectall_failed",
+          HandleId => $dbh_id,
+          Args => [ $sql ],
+          UserData => $stuff);
 
-$k->post('ladbi' => 'fetchrow_hash',
-         SuccessEvent => 'row_fetched',
-         FailureEvent => 'fetch_failed',
-         HandleId => $sth_id,
-         UserData => $stuff);
+ $k->post("ladbi" => "selectall_hash",
+          SuccessEvent => "check_results",
+          FailureEvent => "selectall_failed",
+          HandleId => $dbh_id,
+          Args => [ $sql, $key_field ],
+          UserData => $stuff);
 
-$k->post('ladbi' => 'fetchall',
-         SuccessEvent => 'all_fetched',
-         FailureEvent => 'fetchall_failed',
-         HandleId => $sth_id,
-         Args => [ @optional_indicies ],
-         UserData => $stuff);
+ $k->post("ladbi" => "selectcol",
+          SuccessEvent => "check_results",
+          FailureEvent => "selectcol_failed",
+          HandleId => $dbh_id,
+          Args => [ $sql, $attr_hashref ],
+          UserData => $stuff);
 
-$k->post('ladbi' => 'fetchall_hash',
-         SuccessEvent => 'all_fetched',
-         FailureEvent => 'fetchall_failed',
-         HandleId => $sth_id,
-         Args => [ @optional_keys ],
-         UserData => $stuff);
+ $k->post("ladbi" => "selectrow",
+          SuccessEvent => "check_results",
+          FailureEvent => "selectrow_failed",
+          HandleId => $dbh_id,
+          Args => [ $sql, $attr_hashref ],
+          UserData => $stuff);
 
-$k->post('ladbi' => 'ping',
-         SuccessEvent => 'check_ping_results',
-         FailureEvent => 'ping_failed',
-         HandleId => $dbh_id,
-         UserData => $stuff);
-
-$k->post('ladbi' => 'do',
-         SuccessEvent => 'check_do_results',
-         FailureEvent => 'do_failed',
-         HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref, @bind_values ],
-         UserData => $stuff);
-
-$k->post('ladbi' => 'begin_work',
-         SuccessEvent => 'check_transactions_enabled',
-         FailureEvent => 'begin_work_failed',
-         HandleId => $dbh_id,
-         UserData => $stuff);
-
-$k->post('ladbi' => 'commit',
-         SuccessEvent => 'check_commit',
-         FailureEvent => 'commit_failed',
-         HandleId => $dbh_id,
-         UserData => $stuff);
-
-$k->post('ladbi' => 'rollback',
-         SuccessEvent => 'check_rollback',
-         FailureEvent => 'rollback_failed',
-         HandleId => $dbh_id,
-         UserData => $stuff);
-
-$k->post('ladbi' => 'selectall',
-         SuccessEvent => 'check_results',
-         FailureEvent => 'selectall_failed',
-         HandleId => $dbh_id,
-         Args => [ $sql ],
-         UserData => $stuff);
-
-$k->post('ladbi' => 'selectall_hash',
-         SuccessEvent => 'check_results',
-         FailureEvent => 'selectall_failed',
-         HandleId => $dbh_id,
-         Args => [ $sql, $key_field ],
-         UserData => $stuff);
-
-$k->post('ladbi' => 'selectcol',
-         SuccessEvent => 'check_results',
-         FailureEvent => 'selectcol_failed',
-         HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref ],
-         UserData => $stuff);
-
-$k->post('ladbi' => 'selectrow',
-         SuccessEvent => 'check_results',
-         FailureEvent => 'selectrow_failed',
-         HandleId => $dbh_id,
-         Args => [ $sql, $attr_hashref ],
-         UserData => $stuff);
-
-$k->post('ladbi' => 'quote',
-         SuccessEvent => 'use_quote_results',
-         FailureEvent => 'quote_failed',
-         HandleId => $dbh_id,
-         Args => [ $value ],
-         UserData => $stuff);
+ $k->post("ladbi" => "quote",
+          SuccessEvent => "use_quote_results",
+          FailureEvent => "quote_failed",
+          HandleId => $dbh_id,
+          Args => [ $value ],
+          UserData => $stuff);
 
 
 
 =head1 DESCRIPTION
 
-All events have the same handler. This is because the handler merely creates
-a request message and sends it to the perl sub-process which is doing the
-actuall DBI calls.
+=head2 LaDBI Session Events
+
+=over 4
+
+=item C<shutdown>
+
+This tells the LaDBI session to shutdown. It takes two optional
+arguments, C<$cause> and C<$errstr>. Both arguments get posted
+back to all registered sessions and all outstanding requests.
+
+For registered sessions the C<OfflineEvent> is called with
+C<$cause> and C<$errstr> as ARG0 and ARG1.
+
+For the outstanding requests C<FailureEvent> is called with
+C<$cause> as ARG1 and C<$errstr> as ARG2.
+
+=item C<register>
+
+C<register> is a callable as well as postable event, which registers
+your session with the LaDBI session. All the other events you can
+post to a LaDBI session are request-response events. C<register>
+allows you to get events posted back to your session when events
+occur which effect the LaDBI session as a whole.
+
+=over 4
+
+=item C<OfflineEvent>
+
+LaDBI can loose it's sub-process (which is actually doing the DBI calls).
+In this case an C<OfflineEvent> will be posted to all the client
+sessions which have registered with this LaDBI session.
+
+The C<OfflineEvent> passes two arguments back to the client session.
+
+ sub db_offline {
+   my ($cause, $errstr) = @_[ARG0,ARG1];
+   ...
+ }
+
+The C<$cause> is the either "SHUTDOWN" or the error string from the
+C<ErrorEvent> of LaDBI's internal POE::Wheel::Run .
+
+The C<$errstr> is the value passed to the "shutdown" event or
+the C<ARG0> of the internal POE::Wheel::Run ErrorEvent.
+
+=back
+
+=back
+
+=head2 LaDBI Request Events
+
+All request events have the same handler. This is because the handler merely
+creates a request message and sends it to the perl sub-process which is doing
+the actuall DBI calls.
 
 The handler takes the same arguments. Not all events use the all the argument
 fields. The arguments fields/keys are:
@@ -557,11 +649,11 @@ it just returns the same statement handle id.
 =item C<$datatype>
 
 The value of C<$datatype> is a string that tells you what kind of data
-structure is contained in C<$data>. C<$data> can be a return code 'RC', a
-return value 'RV', an array ref of array refs 'TABLE', a hash ref of hash
-refs 'NAMED_TABLE', an array ref representing a row 'ROW', a hash ref
-representing a row 'NAMED_ROW', an array ref representing a column 'COLUMN',
-or a string meant to represent a part of a SQL statement 'SQL' (like from
+structure is contained in C<$data>. C<$data> can be a return code "RC", a
+return value "RV", an array ref of array refs "TABLE", a hash ref of hash
+refs "NAMED_TABLE", an array ref representing a row "ROW", a hash ref
+representing a row "NAMED_ROW", an array ref representing a column "COLUMN",
+or a string meant to represent a part of a SQL statement "SQL" (like from
 C<$dbh->quote()>).
 
 Here is a some rough descriptions of the format of the values of C<$datatype>:
@@ -642,6 +734,8 @@ C<$dbh-E<gt>ping>.
 
 The scalar passed into the original request which resulted in this response.
 It is entirely programmer defined what is held in this scalar value.
+ Hint: you can set a hash ref as the user data,
+       aka \%stuff_assoc_with_ladbi_call
 
 =back
 
@@ -670,7 +764,7 @@ A C<FailureEvent> is provided the following arguments.
 
   sub failure_event {
     ...
-    my ($handle_id, $errtype, $errstr, $errnum, $userdata) = 
+    my ($handle_id, $errtype, $errstr, $err, $userdata) =
           @_[ARG0..ARG4];
     ...
   }
@@ -678,33 +772,35 @@ A C<FailureEvent> is provided the following arguments.
 The argument C<$handle_id> is either C<undef>, a statement handle, or a
 database handle, depending on the type of requested event.
 
-The argument C<$errtype> can be 'SHUTDOWN', 'ERROR', 'EXCEPTION',
-'INVALID_REQUEST'.
+The argument C<$errtype> can be "SHUTDOWN", "ERROR", "EXCEPTION",
+"INVALID_REQUEST".
 
-The C<$errtype eq 'EXCEPTION'> results from the fact that all the actual
+The C<$errtype eq "EXCEPTION"> results from the fact that all the actual
 DBI command are wrapped in and C<eval {}> and the C<$@> checked. In this
 case, C<$errstr> is set to C<$@> and C<$err> is undefined.
 
-The C<$errtype eq 'ERROR'> results from the fact that the results of the
+The C<$errtype eq "ERROR"> results from the fact that the results of the
 DBI command is checked for C<undef>. Then the appropriate DBI
 C<$DBI::errstr> and C<$DBI::err> are passed back as C<$errstr> and
 C<$err> respectively.
 
-The C<$errtype eq 'SHUTDOWN'> results from abnomal termination of the
+The C<$errtype eq "SHUTDOWN"> results from abnomal termination of the
 C<POE::Component::LaDBI> session. C<$err> is set to the cause and C<$errstr>
-is set to a string explanation of the cause. C<$errstr> can be 'signal' or
+is set to a string explanation of the cause. C<$errstr> can be "signal" or
 a POE::Wheel::Run operation. And C<$err> is set to the signal type or
 wheel operation string value of C<$!>.
 
-The C<$errtype eq 'INVALID_REQUEST'> means that C<POE::Component::LaDBI>
+The C<$errtype eq "INVALID_REQUEST"> means that C<POE::Component::LaDBI>
 failed to instantiate a C<POE::Component::LaDBI::Request> object. Hence,
 nothing was sent to the sub-process running C<POE::Component::LaDBI::Engine>
-for execution.
+for execution. C<$errstr> is set to an empty string and C<$err> is set
+to undef.
 
-The C<$errtype eq 'INVALIE_HANDLE_ID'> means that a
+The C<$errtype eq "INVALIE_HANDLE_ID"> means that a
 C<POE::Component::LaDBI::Request> object was create and the message sent to
 the sub-process, but the C<POE::Component::LaDBI::Engine> object in the
-sub-process did not have a record of that handle id.
+sub-process did not have a record of that handle id. C<$errstr> is set
+to empty string and C<$err> is set to undef.
 
 =item C<HandleId>
 
@@ -727,11 +823,11 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
   use POE;
   use POE::Component::LaDBI;
 
-  my $LADBI_ALIAS = 'ladbi';
+  my $LADBI_ALIAS = "ladbi";
 
-  my $DSN = 'dbi:Pg:dbname=test';
-  my $USER = 'dbuser';
-  my $PASSWD = 'secret';
+  my $DSN = "dbi:Pg:dbname=test";
+  my $USER = "dbuser";
+  my $PASSWD = "secret";
 
   my $SQL = "SELECT * FROM contacts";
 
@@ -747,9 +843,9 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
   	 my ($dsn, $user, $passwd, $sql) = @_[ARG0..ARG3];
   	 print STDERR "_start: args=($dsn,$user,$passwd)\n";
   	 $_[HEAP]->{sql} = $sql;
-  	 $_[KERNEL]->post($LADBI_ALIAS => 'connect',
-  			  SuccessEvent => 'selectall',
-  			  FailureEvent => 'dberror',
+  	 $_[KERNEL]->post($LADBI_ALIAS => "connect",
+  			  SuccessEvent => "selectall",
+  			  FailureEvent => "dberror",
   			  Args => [ $dsn, $user, $passwd ]);
        },
 
@@ -758,17 +854,17 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
        },
 
        shutdown        => sub {
-  	 print STDERR "shutdown: sending shutodnw to $LADBI_ALIAS\n";
-  	 $_[KERNEL]->post($LADBI_ALIAS => 'shutdown');
+  	 print STDERR "shutdown: sending shutdown to $LADBI_ALIAS\n";
+  	 $_[KERNEL]->post($LADBI_ALIAS => "shutdown");
        },
 
        selectall       => sub {
   	 my ($dbh_id, $datatype, $data) = @_[ARG0..ARG2];
   	 $_[HEAP]->{dbh_id} = $dbh_id;
   	 print STDERR "selectall: dbh_id=$dbh_id\n";
-  	 $_[KERNEL]->post($LADBI_ALIAS => 'selectall',
-  			  SuccessEvent => 'display_results',
-  			  FailureEvent => 'dberror',
+  	 $_[KERNEL]->post($LADBI_ALIAS => "selectall",
+  			  SuccessEvent => "display_results",
+  			  FailureEvent => "dberror",
   			  HandleId     => $dbh_id,
   			  Args         => [ $_[HEAP]->{sql} ] );
        },
@@ -777,11 +873,11 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
   	 my ($dbh_id, $datatype, $data) = @_[ARG0..ARG2];
   	 print STDERR "display_results: dbh_id=$dbh_id\n";
   	 for my $row ( @$data ) {
-  	   print join(',', @$row), "\n";
+  	   print join(",", @$row), "\n";
   	 }
-  	 $_[KERNEL]->post($LADBI_ALIAS => 'disconnect',
-  			  SuccessEvent => 'shutdown',
-  			  FailureEvent => 'dberror',
+  	 $_[KERNEL]->post($LADBI_ALIAS => "disconnect",
+  			  SuccessEvent => "shutdown",
+  			  FailureEvent => "dberror",
   			  HandleId     => $dbh_id);
        },
 
@@ -790,8 +886,8 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
   	 print STDERR "dberror: dbh_id  = $dbh_id\n";
   	 print STDERR "dberror: errtype = $errtype\n";
   	 print STDERR "dberror: errstr  = $errstr\n";
-  	 print STDERR "dberror: err     = $err\n" if $errtype eq 'ERROR';
-  	 $_[KERNEL]->yield('shutdown');
+  	 print STDERR "dberror: err     = $err\n" if $errtype eq "ERROR";
+  	 $_[KERNEL]->yield("shutdown");
        }
       } #end: inline_states
     ) #end: POE::Session->create()
@@ -806,7 +902,7 @@ you will recieve a C<FailureEvent>, probably of C<EXCEPTION> type.
 =head2 DEBUGGING
 
 If the environment variable LADBI_DEBUG is set to a true value (perl-wise),
-or the ':DEBUG' symbol is in the use statement import list
+or the ":DEBUG" symbol is in the use statement import list
 (eg C<use POE::Component::LaDBI qw(:DEBUG)>), then debugging will be turned
 on.
 
@@ -814,7 +910,7 @@ When debuggind is turned on, POE::Component::LaDBI->run() will open and log
 messages to a file whos name is indicated in
 $POE::Component::LaDBI::DEBUG_FILE.
 
-The debug log is set to 'ladbi_run.log' by default.
+The debug log is set to "ladbi_run.log" by default.
 
 =head2 EXPORT
 
@@ -823,7 +919,7 @@ None by default.
 
 =head1 AUTHOR
 
-Sean M. Egan, E<lt>seanegan@bigfoot.comE<gt>
+Sean M. Egan, E<lt>seanegan:bigfoot_comE<gt>
 
 =head1 SEE ALSO
 

@@ -325,7 +325,7 @@ None by default.
 
 =head1 AUTHOR
 
-Sean Egan, seanegan@bigfoot.com
+Sean Egan, E<lt>seanegan:bigfoot_comE<gt>
 
 =head1 SEE ALSO
 

@@ -89,7 +89,12 @@ EOM2
 Enter the password for the above username. Remember to delete the file
 $BASE_CFG_FN after the tests run.
 EOM3
-    $cfg->{PASSWD} = read_answer_nonzero("PASSWD => ");
+  READ_PASSWD:
+    $cfg->{PASSWD} = read_answer("PASSWD => ");
+    if (length($cfg->{PASSWD}) == 0) {
+      goto READ_PASSWD
+	unless read_answer_yes("Your password is empty, is that OK?");
+    }
 
   } until config_ok($cfg);
   print "\n";
@@ -106,7 +111,8 @@ EOM3
 sub config_ok {
   my ($cfg) = @_;
   return unless ref($cfg) eq 'HASH';
-  for my $k (qw(DSN USER PASSWD)) {
+  # allow PASSWD to be empty
+  for my $k (qw(DSN USER)) {
     return unless exists $cfg->{$k};
     my $v = $cfg->{$k};
     $v =~ s/^\s*//;
@@ -164,6 +170,16 @@ sub read_answer_yes {
       return 0;
     }
   }
+}
+
+sub read_answer {
+  my ($prompt) = @_;
+  chomp $prompt;
+  print $prompt;
+  my $ans = get_answer();
+  $ans =~ s/^\s*//;
+  $ans =~ s/\s*$//;
+  return $ans;
 }
 
 sub read_answer_nonzero {

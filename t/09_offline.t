@@ -52,7 +52,8 @@ POE::Session->create
       $_[KERNEL]->alias_remove("test");
     },
     db_offline   => sub {
-      $LOG->print("db_offline: cause=", $_[ARG0], "; errstr=", $_[ARG1], ";\n");
+      $LOG->print("db_offline: cause=", $_[ARG0], "; errstr=", $_[ARG1],
+		  "; alias=", $_[ARG2], ";\n");
       $OK = 1;
       $_[KERNEL]->alarm_remove_all();
       $_[KERNEL]->yield('shutdown');

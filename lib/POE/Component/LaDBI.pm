@@ -9,7 +9,7 @@ use IO::File;
 use Data::Dumper;
 
 BEGIN {
-  our $VERSION = '1.2.0';
+  our $VERSION = '1.2.1';
 }
 
 use POE qw(
@@ -117,22 +117,32 @@ sub shutdown {
   my ($k,$s,$h) = @_[KERNEL, SESSION, HEAP];
   my ($cause, $errstr) = @_[ARG0,ARG1];
 
+  unless (defined $h->{alias}) {
+    # shutdown already called
+    return;
+  }
+
+  my $alias = delete $h->{alias};
+  $k->alias_remove( $alias );
+
   for my $sid ( keys %{ $h->{registered_sessions} } ) {
     my $reg_info = $h->{registered_sessions}->{$sid};
     my $offline_event = $reg_info->[0];
-    $k->post($sid => $offline_event, $cause, $errstr);
+    $k->post($sid => $offline_event, $cause, $errstr, $alias);
   }
 
-  $k->alias_remove( delete $h->{alias} );
-
-  $h->{wheel}->kill(-9);
-  delete $h->{wheel};
+  my $run_wheel = delete $h->{wheel};
+  if (defined $run_wheel) {
+    $run_wheel->kill(-9);
+  }
 
   for my $req_id ( keys %{ $h->{req_ids} } ) {
 
-    my ($session, $succ_ev, $fail_ev) = @{ $h->{req_ids}->{ $req_id } };
+    my ($session, $succ_ev, $fail_ev, $handle_id, $userdata) =
+      @{ $h->{req_ids}->{ $req_id } };
 
-    $k->post($session, $fail_ev, 'SHUTDOWN', $cause, $errstr);
+    $k->post($session => $fail_ev,
+	     $handle_id, 'SHUTDOWN', $cause, $errstr, $userdata);
 
   }
 
@@ -170,9 +180,9 @@ sub register {
 
 sub run_error {
   my ($k,$s,$h) = @_[KERNEL,SESSION,HEAP];
-  my ($errtype, $errnum, $errstr, $wheel_id) = @_[ARG0..ARG3];
+  my ($sysret, $errno, $errstr, $wheel_id, $handle) = @_[ARG0..ARG4];
 
-  $k->yield('shutdown', $errstr, $errtype);
+  $k->yield('shutdown', 'run_error', $errstr);
 
   return 1;
 } #end: run_error()
@@ -183,7 +193,7 @@ sub run_stdout {
   my ($k,$s,$h) = @_[KERNEL,SESSION,HEAP];
   my ($resp, $wheel_id) = @_[ARG0,ARG1];
 
-  my ($sender, $succ_ev, $fail_ev, $userdata) =
+  my ($sender, $succ_ev, $fail_ev, $handle_id, $userdata) =
     @{ delete $h->{req_ids}->{ $resp->id } };
 
   my ($ev, $id, $type, @data);
@@ -259,32 +269,38 @@ sub dbi_request_handler {
 
   my (%args) = map { lc($_), $a{$_} } keys %a;
 
+  my $handle_id = $args{handleid};
+  my $succ_ev   = $args{successevent};
+  my $fail_ev   = $args{failureevent};
+  my $userdata  = $args{userdata};
+  my $args      = $args{args};
+
   my $req = POE::Component::LaDBI::Request->new
     (
-     Cmd      => $state         ,
-     Data     => $args{args}    ,
-     HandleId => $args{handleid}
+     Cmd      => $state     ,
+     Data     => $args      ,
+     HandleId => $handle_id
     )
       or do {
 	# Operational Error
 	#
-	$k->post($sender, $args{failureevent},
-		 $args{handle_id},   # $_[ARG0] : handle_id
+	$k->post($sender, $fail_ev,
+		 $handle_id       ,  # $_[ARG0] : handle_id
 		 'INVALID_REQUEST',  # $_[ARG1] : errtype
 		 '',                 # $_[ARG2] : errstr
 		 undef,              # $_[ARG3] : err
-		 $args{userdata}     # $_[ARG4] : userdata
+		 $userdata           # $_[ARG4] : userdata
 		);
 	return;
       };
 
-  my $succ_ev  = $args{successevent};
-  my $fail_ev  = $args{failureevent};
-  my $userdata = $args{userdata};
-
   $k->refcount_increment($sender->ID, 'ladbi');
 
-  $h->{req_ids}->{ $req->id } = [$sender, $succ_ev, $fail_ev, $userdata];
+  $h->{req_ids}->{ $req->id } = [ $sender    ,
+				  $succ_ev   ,
+				  $fail_ev   ,
+				  $handle_id ,
+				  $userdata   ];
 
   $h->{wheel}->put( $req );
 
@@ -349,6 +365,11 @@ sub run {
       }
 
       $input .= $buf;
+
+      if ($nread == $READ_SIZE) {
+        DEBUG && $debug_fh->print((caller(0))[3], " $nread == $READ_SIZE\n");
+        next READ_LOOP;
+      }
 
       $reqs = $filter->get( [$input] );
 
@@ -565,7 +586,7 @@ sessions which have registered with this LaDBI session.
 The C<OfflineEvent> passes two arguments back to the client session.
 
  sub db_offline {
-   my ($cause, $errstr) = @_[ARG0,ARG1];
+   my ($cause, $errstr, $alias) = @_[ARG0,ARG1,ARG2];
    ...
  }
 
@@ -574,6 +595,12 @@ C<ErrorEvent> of LaDBI's internal POE::Wheel::Run .
 
 The C<$errstr> is the value passed to the "shutdown" event or
 the C<ARG0> of the internal POE::Wheel::Run ErrorEvent.
+
+The C<$alias> is the alias of the C<POE::Component::LaDBI> session
+which has lost it's subprocess and is shutting downn. This allows the
+registered user of the C<POE::Component::LaDBI> session to track LaDBI
+sessions from start up to shutdown.
+
 
 =back
 
@@ -770,7 +797,8 @@ A C<FailureEvent> is provided the following arguments.
   }
 
 The argument C<$handle_id> is either C<undef>, a statement handle, or a
-database handle, depending on the type of requested event.
+database handle depending on the type of request which was submitted
+and now failed.
 
 The argument C<$errtype> can be "SHUTDOWN", "ERROR", "EXCEPTION",
 "INVALID_REQUEST".
